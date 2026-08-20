@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: recruitment-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: recruitment
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d recruitment"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: recruitment-api
+    environment:
+      PORT: 3001
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: recruitment
+      # TypeORM creates and migrates the schema on boot, then SeedService loads demo data.
+      DB_SYNCHRONIZE: "true"
+      DB_LOGGING: "false"
+      JWT_SECRET: recruitment-secret-key-change-in-production
+      NODE_ENV: development
+      # Uploaded CVs. A named volume, not the bind-mounted source tree, so they
+      # survive a rebuild and never land in the repository.
+      UPLOAD_DIR: /app/storage/resumes
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - resume_storage:/app/storage
+    healthcheck:
+      # 127.0.0.1, not localhost: busybox wget resolves localhost to ::1 first
+      # and the API listens on IPv4.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3001/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    command: npm run start:dev
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: recruitment-web
+    environment:
+      # Vite dev server proxies /api to the backend container.
+      VITE_API_PROXY: http://backend:3001
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  resume_storage:

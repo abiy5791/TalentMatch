@@ -1,0 +1,103 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-50 font-sans text-base text-ink-900 antialiased;
+  }
+
+  ::selection {
+    @apply bg-accent-100 text-accent-800;
+  }
+
+  /* Numeric data always reads as a column, never as prose. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full border-[3px] border-solid border-transparent bg-ink-300 bg-clip-content;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* ---- Surfaces ------------------------------------------------ */
+  .card {
+    @apply rounded-md border border-ink-200 bg-white shadow-xs;
+  }
+
+  /* ---- Type ---------------------------------------------------- */
+  .eyebrow {
+    @apply text-2xs font-semibold uppercase tracking-eyebrow text-ink-500;
+  }
+
+  /* ---- Form controls ------------------------------------------- */
+  .input {
+    @apply w-full rounded-sm border border-ink-300 bg-white px-3 py-2 text-sm text-ink-900
+           outline-none transition-colors duration-base ease-out
+           placeholder:text-ink-400
+           focus:border-ink-900 focus:ring-[3px] focus:ring-ink-900/10
+           disabled:cursor-not-allowed disabled:bg-ink-100 disabled:text-ink-400;
+  }
+
+  .select {
+    @apply input cursor-pointer appearance-none bg-no-repeat pr-8;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2378776F' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-position: right 10px center;
+  }
+
+  /* ---- Buttons -------------------------------------------------- */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-sm
+           text-sm font-medium transition-colors duration-base ease-out
+           focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ink-900/10
+           disabled:cursor-not-allowed disabled:opacity-45;
+  }
+  .btn-sm {
+    @apply h-8 px-3 text-xs;
+  }
+  .btn-md {
+    @apply h-[34px] px-3.5;
+  }
+  .btn-lg {
+    @apply h-10 px-4;
+  }
+  .btn-primary {
+    @apply bg-accent-500 text-white hover:bg-accent-600 active:bg-accent-700
+           focus-visible:ring-accent-500/25;
+  }
+  .btn-dark {
+    @apply bg-ink-900 text-white hover:bg-ink-800 active:bg-ink-700;
+  }
+  .btn-secondary {
+    @apply border border-ink-300 bg-white text-ink-700 hover:bg-ink-100 active:bg-ink-200;
+  }
+  .btn-ghost {
+    @apply text-ink-600 hover:bg-ink-100 hover:text-ink-900;
+  }
+  .btn-danger {
+    @apply bg-danger-500 text-white hover:bg-danger-700;
+  }
+
+  /* ---- Table --------------------------------------------------- */
+  .th {
+    @apply px-4 py-2.5 text-left text-2xs font-semibold uppercase tracking-eyebrow text-ink-500;
+  }
+  .td {
+    @apply px-4 py-3 align-middle text-sm text-ink-700;
+  }
+}

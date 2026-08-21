@@ -385,6 +385,27 @@ Usually the database is far from the function. Set the function region
 The file is over the limit. Vercel's hard ceiling is 4.5 MB per request body, and
 nothing in this app can raise it — that is the platform, not the code.
 
+### The build works locally but `tsc` fails on Vercel with `TS2307: Cannot find module`
+
+A source file exists on your machine but was never committed, so Vercel's clone
+does not have it. `.gitignore` is the usual reason, and it fails silently — an
+ignored file never shows up in `git status`, so nothing hints that it is missing.
+
+Ask git what it would actually deploy:
+
+```bash
+git ls-files --others --ignored --exclude-standard | grep -v node_modules
+```
+
+Anything in that list which is real source is your problem. `git add -f <file>`
+recovers it, but fix the rule too, or the next file to land there disappears the
+same way.
+
+Watch for **unanchored directory patterns**. `lib/` matches at every depth, not
+just the root, so a Python-venv rule will happily swallow `frontend/src/lib/`.
+Anchor root-only artefacts with a leading slash — `/lib/` — and leave patterns
+like `dist/` unanchored only where you really do mean "at any depth".
+
 ### The frontend 404s when you refresh at `/dashboard`
 
 The SPA rewrite in `frontend/vercel.json` is missing or was edited. Every path

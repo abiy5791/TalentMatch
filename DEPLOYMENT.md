@@ -95,8 +95,15 @@ Keep both values to hand. You need them in the next step.
 You now have an API URL like `https://recruitment-api.vercel.app`. Visit it — you
 should get a small landing page, and `/api/docs` should give you Swagger.
 
-`/api/v1/health` will report `"database": "down"` at this point. That is correct:
-the database exists but has no tables yet. Step 3 fixes it.
+Now open `/api/v1/health`. On a fresh database it says:
+
+```json
+{ "status": "setup-required", "database": "up", "schema": "missing", ... }
+```
+
+`"database": "up"` means the API reached Postgres. `"schema": "missing"` means the
+database is still empty — no tables. **That is expected here**, and Step 3 is what
+fixes it.
 
 ---
 
@@ -121,7 +128,20 @@ npm run build
 npm run db:setup
 ```
 
-On Windows PowerShell use `$env:DATABASE_URL = "..."` instead of `export`.
+**On Windows**, use PowerShell and set the variables like this instead:
+
+```powershell
+cd backend
+npm install
+
+$env:DATABASE_URL = "postgresql://user:password@ep-...neon.tech/neondb?sslmode=require"
+$env:JWT_SECRET   = "the-secret-you-generated"
+
+npm run build
+npm run db:setup
+```
+
+The variables last only for that terminal window. Close it and you set them again.
 
 `db:setup` creates the tables, then loads the demo dataset — an Ethiopian
 recruitment desk, salaries in birr, a handful of companies, candidates and live
@@ -136,12 +156,16 @@ Three commands, if you want them separately:
 | `npm run db:seed`   | Loads the demo data, only if empty           |
 | `npm run db:setup`  | Both, in that order                          |
 
-Check it took:
+Check it took — open `/api/v1/health` again. It should now say:
 
-```bash
-curl https://recruitment-api.vercel.app/api/v1/health
-# {"status":"ok","database":"up","timestamp":"..."}
+```json
+{ "status": "ok", "database": "up", "schema": "ready", ... }
 ```
+
+`"schema": "ready"` is the confirmation that the tables exist. If it still says
+`"missing"`, the command ran against a different database than the one Vercel
+uses — compare the `DATABASE_URL` you exported with the one in the project's
+environment variables, character for character.
 
 > **Deploying for real rather than demoing?** Skip the seed. Run
 > `npm run db:schema` alone, then create your first admin by hand — the seeded

@@ -1,6 +1,5 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
-import { MulterExceptionFilter } from './common/filters/multer-exception.filter';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -21,9 +20,6 @@ async function bootstrap() {
       transformOptions: { enableImplicitConversion: true },
     }),
   );
-  // Multer rejects a bad upload before any handler runs; without this the
-  // caller sees a 500 for what is their own mistake.
-  app.useGlobalFilters(new MulterExceptionFilter());
   app.setGlobalPrefix('api/v1');
 
   const config = new DocumentBuilder()

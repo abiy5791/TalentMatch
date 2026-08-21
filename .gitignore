@@ -199,3 +199,11 @@ docker-volumes/
 .terraform/
 *.tfstate
 *.tfstate.*
+# ============================================
+# UPLOADED FILES
+# ============================================
+
+# Applicant CVs written by the API when UPLOAD_DIR is a local path.
+# Personal data - never commit these.
+backend/storage/
+storage/resumes/

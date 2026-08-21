@@ -111,6 +111,7 @@ follows whatever is actually in the database rather than a list kept in the clie
 | **Jobs** | Postings with a DRAFT → PENDING_APPROVAL → APPROVED → LIVE gate; LIVE + PUBLIC puts a role on the careers board |
 | **Careers board** | Unauthenticated: search live public roles by title, company, skill and location, and apply without an account |
 | **Applications** | Inbound applications, a recruiter-set status and a plain-language timeline the applicant reads |
+| **CVs** | Optional or required per role; type/signature-checked on upload, stored outside the web root, downloadable only by the recruiting team or the CV's owner |
 | **Matching** | Weighted multi-factor scoring, per-job / per-candidate / full recalculation |
 | **Dispatch** | Push selected or top-N candidates to a client; notifies the account manager and advances the pipeline |
 | **Pipeline** | Candidate / company / placement state machines with validated transitions and full history |
@@ -219,6 +220,33 @@ Anyone can apply, with no account:
    never be able to create anything else.
 4. The account manager for the employer gets a notification either way.
 
+### Applying with an account
+
+Signing in changes two things, both about not retyping what we already hold.
+
+The form opens prefilled from the profile — name, contact, current role, experience,
+salary expectation, skills and the CV on file — and **every field stays editable**.
+An edit is not discarded: the profile is updated with it before the application is
+sent, because that is where those details came from. Email is the exception, being
+the account's identity.
+
+The submission goes to `POST /me/applications`, not the public endpoint. It carries
+only a job id, a cover note and optionally a CV: the applicant's identity comes from
+the token, so there is no name or email field that could disagree with the account.
+
+### Asking for a CV
+
+A role carries `requiresResume`. Off by default — asking for a document is a decision
+the hiring team makes per role, not a tax on every applicant. Turn it on when posting
+and the board shows a *CV required* badge, the form will not submit without one, and
+the API refuses the application even if the form is bypassed.
+
+Uploads are **append-only**. Replacing a CV writes a new file rather than overwriting,
+so an application always resolves to the document that was actually sent with it, not
+whatever the candidate uploaded three months later.
+
+See [Handling uploaded CVs](#handling-uploaded-cvs) for what happens to the file.
+
 ### Following it
 
 `/applications` in the console is where a recruiter answers. Setting a status writes
@@ -231,6 +259,70 @@ timeline behind it, and a withdraw button. What they never see is the machinery 
 match scores, which client was pitched, recruiter notes, or their internal pipeline
 stage. `CandidateScopeGuard` resolves their candidate id from the token, never from
 the request, so there is no id to substitute for somebody else's application.
+
+## Handling uploaded CVs
+
+A CV is a file a stranger chose, containing somebody's personal data. Both halves of
+that shape the design.
+
+### Accepting one
+
+`POST /public/resumes` is the only unauthenticated write in the API that consumes
+storage, so it is the most defended route here. Multer holds the upload **in memory**
+— nothing a stranger sends touches the disk until it has been checked:
+
+| Control | What it stops |
+|---|---|
+| 5 MB cap, one file, bounded parts | Filling the disk, or the process, with one request |
+| Extension allowlist: `.pdf` `.doc` `.docx` | `.exe`, `.svg`, `.html` and everything else scriptable |
+| Declared content type must match the extension | A file renamed to look acceptable |
+| **Magic bytes must match too** | A PHP shell called `cv.pdf` — the header is `%PDF-`, or it is not a PDF |
+| Stored name is the row's UUID, never the uploader's | Path traversal, overwriting, name collisions |
+| Uploader's name kept only for display, control characters stripped | Response-header injection through a filename |
+| 5 uploads / 15 min / address | Someone scripting the endpoint |
+| Written `wx`, mode `0600`, SHA-256 recorded | Silent clobbering; tampering on the way back out |
+
+The declared type is a *claim*; the signature is *evidence*. Both have to agree, and a
+disagreement is a rejection rather than a guess — a `.pdf` that opens with a zip header
+is not a file somebody named badly.
+
+### Storing it
+
+Files live under `UPLOAD_DIR` (a named Docker volume, never the bind-mounted source
+tree) as `<uuid>.bin`. Nothing is served statically from there; the only route out is
+the guarded download.
+
+An anonymous upload is **unclaimed** until the application that uses it arrives, and
+carries a 2-hour expiry. A sweep runs on boot and every 30 minutes to delete unclaimed
+uploads that expired, and any file whose row has gone — a deleted candidate cascades
+the row away but not the bytes. Files written inside the grace window are skipped, so
+an upload in flight is never removed underneath its own request.
+
+### Giving it back
+
+`GET /resumes/:id` serves two callers: the recruiting team (`candidates:read`) and the
+person whose CV it is. An employer is deliberately not on that list — the portal shows
+what was formally submitted about a candidate, and a CV is not part of it. A CV you may
+not read returns **404, not 403**, so the endpoint does not confirm that an id exists.
+
+The response is always `Content-Disposition: attachment` with
+`Content-Type: application/octet-stream`, `X-Content-Type-Options: nosniff`,
+`Content-Security-Policy: default-src 'none'; sandbox` and `Cache-Control: private,
+no-store`. A PDF rendered in-page is a scripting surface on this origin, and no
+recruiter needs one to read a CV.
+
+### Known limits
+
+- The rate limiter is an **in-process fixed window**. It protects one instance, which
+  suits a single container. Behind more than one replica, or anywhere the client IP is
+  worth spoofing, it belongs in Redis or at the edge; the guard is the enforcement
+  point to swap.
+- No malware scanning. The type checks stop a file from *being* something else, not
+  from *containing* something — a real PDF with a malicious payload is stored as a real
+  PDF. Put a scanner in front of `ResumeStorageService.store()` before this faces real
+  applicants.
+- Files are stored as uploaded, not encrypted at rest. Disk-level encryption is the
+  deployment's job.
 
 ## Client Portal
 
@@ -334,7 +426,8 @@ Full interactive documentation at `/api/docs`. Base path is `/api/v1`.
 | Jobs | `GET/POST /jobs`, `GET/PUT/DELETE /jobs/:id`, `PATCH /jobs/:id/submit`, `PATCH /jobs/:id/approve`, `PATCH /jobs/:id/publish`, `PATCH /jobs/:id/status` |
 | Public | `GET /public/jobs`, `GET /public/jobs/filters`, `GET /public/jobs/:slugOrId`, `POST /public/applications` — **no token** |
 | Applications | `GET /applications`, `PATCH /applications/:id/status` |
-| Candidate | `GET /me/summary`, `/me/profile`, `/me/applications`, `/me/applications/:id` · `PUT /me/profile` · `PATCH /me/applications/:id/withdraw` |
+| Resumes | `POST /public/resumes` (**no token**, rate limited) · `GET /resumes/:id` (staff or the CV's owner) |
+| Candidate | `GET /me/summary`, `/me/profile`, `/me/applications`, `/me/applications/:id` · `PUT /me/profile` · `POST /me/applications`, `/me/resume` · `PATCH /me/applications/:id/withdraw` |
 | Portal | `GET /portal/company`, `/overview`, `/jobs`, `/candidates`, `/candidates/:id`, `/placements`, `/team` · `POST /portal/jobs/request`, `/portal/team` · `PATCH /portal/candidates/:id/respond`, `/portal/placements/:id/feedback`, `/portal/team/:id/status`, `/portal/team/:id/role` |
 | Matching | `GET /matches`, `GET /matches/dispatches`, `GET /matches/job/:id`, `GET /matches/candidate/:id`, `POST /matches/calculate`, `POST /matches/calculate/job/:id`, `POST /matches/calculate/candidate/:id`, `POST /matches/dispatch`, `POST /matches/batch-dispatch` |
 | Pipeline | `GET /pipeline/stages`, `GET /pipeline/:type`, `GET /pipeline/:type/counts`, `GET /pipeline/:type/:id/history`, `POST /pipeline/transition` |
@@ -379,7 +472,8 @@ recruitment-platform/
 ├── backend/
 │   ├── src/
 │   │   ├── database/            # Snake-case naming strategy, numeric transformer
-│   │   ├── entities/            # TypeORM entities (11 tables)
+│   │   ├── common/guards/       # Rate limiting
+│   │   ├── entities/            # TypeORM entities (12 tables)
 │   │   ├── modules/
 │   │   │   ├── auth/            # Login, permission matrix + guard
 │   │   │   ├── companies/       # Employer accounts and tiers
@@ -390,6 +484,7 @@ recruitment-platform/
 │   │   │   ├── placements/      # Placements, fees, feedback
 │   │   │   ├── portal/          # Client portal, company-scoped
 │   │   │   ├── public/          # Unauthenticated job board and apply
+│   │   │   ├── resumes/         # CV validation, storage, sweep and download
 │   │   │   ├── me/              # Applicant self-service, candidate-scoped
 │   │   │   ├── applications/    # Inbound applications and their status
 │   │   │   ├── analytics/       # Metrics and gap analysis
@@ -428,6 +523,7 @@ Backend environment variables (see `backend/.env.example`):
 | `DB_LOGGING` | `false` | Log SQL |
 | `JWT_SECRET` | dev default | **Change before deploying** |
 | `CORS_ORIGIN` | any | Restrict in production |
+| `UPLOAD_DIR` | `./storage/resumes` | Where CVs are written. Must be writable, and must not be served statically — see [Handling uploaded CVs](#handling-uploaded-cvs). In Docker this is a named volume, so CVs survive a rebuild and never land in the repository. |
 
 ## Technology Stack
 
@@ -443,7 +539,10 @@ Backend environment variables (see `backend/.env.example`):
 
 Deliberately out of scope for this MVP; see the implementation plan for the full target:
 
-- Resume parsing service (Python/FastAPI, `POST /candidates/parse-resume`)
+- Resume parsing service (Python/FastAPI, `POST /candidates/parse-resume`) — CVs are
+  stored and served, but never read or indexed
+- Malware scanning on uploads (see [Known limits](#known-limits))
+- Distributed rate limiting (the current guard is per-process)
 - Elasticsearch search, Redis cache, RabbitMQ event bus
 - Email delivery (notifications are persisted and shown in-app only)
 - Interview scheduling, background-check and CRM integrations

@@ -18,5 +18,7 @@ import { MatchingModule } from '../modules/matching/matching.module';
     MatchingModule,
   ],
   providers: [SeedService],
+  // The `db:setup` CLI drives seeding explicitly where boot-time seeding is off.
+  exports: [SeedService],
 })
 export class SeedModule {}

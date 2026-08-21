@@ -7,6 +7,7 @@ import { User } from '../../entities/user.entity';
 import { Company } from '../../entities/company.entity';
 import { LoginDto, CreateUserDto } from './dto/auth.dto';
 import { permissionsFor, ROLE_DESCRIPTIONS, Role, isClientRole, homeFor } from './permissions';
+import { jwtExpiresIn, jwtSecret } from './jwt.config';
 
 @Injectable()
 export class AuthService {
@@ -64,8 +65,8 @@ export class AuthService {
     };
     return {
       access_token: this.jwtService.sign(payload, {
-        secret: process.env.JWT_SECRET || 'recruitment-secret-key',
-        expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+        secret: jwtSecret(),
+        expiresIn: jwtExpiresIn(),
       }),
       user: await this.decorate(user),
     };

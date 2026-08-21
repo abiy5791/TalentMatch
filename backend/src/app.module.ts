@@ -16,28 +16,13 @@ import { ApplicationsModule } from './modules/applications/applications.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { SeedModule } from './seed/seed.module';
-import { SnakeNamingStrategy } from './database/snake-naming.strategy';
+import { databaseOptions } from './database/data-source-options';
 import { HealthController } from './health.controller';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    TypeOrmModule.forRoot({
-      type: 'postgres',
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '5432', 10),
-      username: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD || 'postgres',
-      database: process.env.DB_NAME || 'recruitment',
-      entities: [__dirname + '/**/*.entity{.ts,.js}'],
-      namingStrategy: new SnakeNamingStrategy(),
-      // Schema is owned by TypeORM in dev; database/schema.sql documents the
-      // equivalent DDL for environments that provision the database up front.
-      synchronize: process.env.DB_SYNCHRONIZE !== 'false',
-      logging: process.env.DB_LOGGING === 'true',
-      retryAttempts: 10,
-      retryDelay: 3000,
-    }),
+    TypeOrmModule.forRoot(databaseOptions()),
     AuthModule,
     CompaniesModule,
     CandidatesModule,

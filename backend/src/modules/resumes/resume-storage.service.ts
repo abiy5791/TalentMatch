@@ -4,18 +4,40 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { LessThan, Repository } from 'typeorm';
-import { createHash, randomUUID } from 'crypto';
+import { createHash } from 'crypto';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { ResumeFile } from '../../entities/resume-file.entity';
+import { IS_SERVERLESS } from '../../database/data-source-options';
 
-/** 5 MB. A CV that does not fit in this is not a CV. */
-export const MAX_RESUME_BYTES = 5 * 1024 * 1024;
+/**
+ * The size ceiling for one CV. 5 MB: a CV that does not fit in this is not a CV.
+ *
+ * Lower under serverless, because the platform caps a request body below that
+ * anyway — Vercel rejects anything over 4.5 MB before the function is invoked,
+ * which reaches an applicant as a dead upload rather than a message they can
+ * act on. Better to state a limit we can enforce and explain. Override with
+ * MAX_RESUME_MB.
+ */
+export const MAX_RESUME_BYTES = Math.round(
+  parseFloat(process.env.MAX_RESUME_MB || (IS_SERVERLESS ? '4' : '5')) * 1024 * 1024,
+);
 
 /** Unclaimed anonymous uploads are swept after this long. */
 const UNCLAIMED_TTL_MS = 2 * 60 * 60 * 1000;
 
 const SWEEP_INTERVAL_MS = 30 * 60 * 1000;
+
+/**
+ * Where the bytes go.
+ *
+ * `fs` writes to a directory — right for the container deployment, which has a
+ * volume behind it. `db` puts them in the row — right for serverless, where the
+ * only writable path is a /tmp that is discarded with the instance, so an
+ * upload written there is lost minutes later. The driver is the single switch;
+ * nothing above this service knows which one is in use.
+ */
+export type StorageDriver = 'fs' | 'db';
 
 /**
  * The only formats accepted, each pinned to the bytes a real file of that type
@@ -79,14 +101,28 @@ function sanitiseName(raw: string | undefined, fallbackExt: string): string {
 export class ResumeStorageService implements OnApplicationBootstrap {
   private readonly logger = new Logger(ResumeStorageService.name);
   private readonly root: string;
+  private readonly driver: StorageDriver;
+  /** Serverless has no timer to sweep on, so writes carry the cost occasionally. */
+  private lastSweep = 0;
 
   constructor(@InjectRepository(ResumeFile) private repo: Repository<ResumeFile>) {
+    const configured = process.env.RESUME_STORAGE as StorageDriver | undefined;
+    if (configured && configured !== 'fs' && configured !== 'db') {
+      throw new Error(`RESUME_STORAGE must be "fs" or "db", got "${configured}"`);
+    }
+    // A serverless deployment that quietly chose `fs` would accept every upload
+    // and lose it, so the default follows the platform rather than the other way.
+    this.driver = configured || (IS_SERVERLESS ? 'db' : 'fs');
     // Deliberately outside anything the app serves statically — the only route
     // to these bytes is the guarded download endpoint.
     this.root = path.resolve(process.env.UPLOAD_DIR || path.join(process.cwd(), 'storage', 'resumes'));
   }
 
   async onApplicationBootstrap() {
+    if (this.driver === 'db') {
+      this.logger.log('Resume storage in database (resume_files.data)');
+      return;
+    }
     await fs.mkdir(this.root, { recursive: true });
     this.logger.log(`Resume storage at ${this.root}`);
     // Unref'd: a pending sweep must never hold the process open on shutdown.
@@ -142,17 +178,31 @@ export class ResumeStorageService implements OnApplicationBootstrap {
       candidate: owner.candidateId ? ({ id: owner.candidateId } as any) : null,
       claimed: Boolean(owner.candidateId),
       expiresAt: owner.candidateId ? null : new Date(Date.now() + UNCLAIMED_TTL_MS),
+      // Under `db` the bytes are part of the row, so the insert is atomic and
+      // the half-written state the `fs` branch has to undo cannot arise.
+      data: this.driver === 'db' ? file.buffer : null,
     });
     const saved = await this.repo.save(record);
 
-    try {
-      // wx: never overwrite. The id is fresh, so a collision means something is
-      // badly wrong and silently clobbering somebody's CV is the worst response.
-      await fs.writeFile(this.pathFor(saved.id), file.buffer, { flag: 'wx', mode: 0o600 });
-    } catch (e) {
-      await this.repo.delete(saved.id);
-      throw e;
+    if (this.driver === 'fs') {
+      try {
+        // wx: never overwrite. The id is fresh, so a collision means something is
+        // badly wrong and silently clobbering somebody's CV is the worst response.
+        await fs.writeFile(this.pathFor(saved.id), file.buffer, { flag: 'wx', mode: 0o600 });
+      } catch (e) {
+        await this.repo.delete(saved.id);
+        throw e;
+      }
     }
+
+    // Nothing ticks between requests in a serverless instance, so the
+    // housekeeping a timer would have done rides along with the writes. Not
+    // awaited: an applicant's upload should not wait on tidying up after others.
+    this.maybeSweep();
+
+    // The buffer was only needed for the insert. Drop it before the row is
+    // returned, so no response serialiser upstream can reach the bytes.
+    delete (saved as Partial<ResumeFile>).data;
     return saved;
   }
 
@@ -183,10 +233,20 @@ export class ResumeStorageService implements OnApplicationBootstrap {
    */
   async read(record: ResumeFile): Promise<Buffer> {
     let buffer: Buffer;
-    try {
-      buffer = await fs.readFile(this.pathFor(record.id));
-    } catch {
-      throw new NotFoundException('That CV is no longer stored');
+    if (this.driver === 'db') {
+      // `data` is select:false, so it has to be asked for by name.
+      const row = await this.repo.findOne({
+        where: { id: record.id },
+        select: { id: true, data: true } as any,
+      });
+      if (!row?.data?.length) throw new NotFoundException('That CV is no longer stored');
+      buffer = Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data);
+    } else {
+      try {
+        buffer = await fs.readFile(this.pathFor(record.id));
+      } catch {
+        throw new NotFoundException('That CV is no longer stored');
+      }
     }
     if (createHash('sha256').update(buffer).digest('hex') !== record.checksum) {
       this.logger.error(`Checksum mismatch reading resume ${record.id}`);
@@ -212,33 +272,46 @@ export class ResumeStorageService implements OnApplicationBootstrap {
     return resolved;
   }
 
+  /** Holds the piggybacked sweep to the same interval the timer would have used. */
+  private maybeSweep() {
+    const now = Date.now();
+    if (now - this.lastSweep < SWEEP_INTERVAL_MS) return;
+    this.lastSweep = now;
+    this.sweep().catch(e => this.logger.warn(`Sweep failed: ${e.message}`));
+  }
+
   /**
    * Two jobs, both about not accumulating other people's files: drop uploads
    * nobody ever attached to an application, and drop files whose row has gone
    * (a deleted candidate cascades the row away but not the bytes).
+   *
+   * Only the first applies under `db`: there the bytes are a column, so deleting
+   * the row takes them with it and an orphan is not a state the data can reach.
    */
   private async sweep() {
     const expired = await this.repo.find({
       where: { claimed: false, expiresAt: LessThan(new Date()) },
     });
     for (const record of expired) {
-      await fs.rm(this.pathFor(record.id), { force: true });
+      if (this.driver === 'fs') await fs.rm(this.pathFor(record.id), { force: true });
       await this.repo.delete(record.id);
     }
 
-    const onDisk = await fs.readdir(this.root).catch(() => [] as string[]);
-    const grace = Date.now() - UNCLAIMED_TTL_MS;
     let orphans = 0;
-    for (const name of onDisk) {
-      if (!name.endsWith('.bin')) continue;
-      const id = name.slice(0, -4);
-      const full = path.join(this.root, name);
-      // Skip anything written recently, so a file mid-upload is never removed.
-      const stat = await fs.stat(full).catch(() => null);
-      if (!stat || stat.mtimeMs > grace) continue;
-      if (await this.repo.findOne({ where: { id } })) continue;
-      await fs.rm(full, { force: true });
-      orphans += 1;
+    if (this.driver === 'fs') {
+      const onDisk = await fs.readdir(this.root).catch(() => [] as string[]);
+      const grace = Date.now() - UNCLAIMED_TTL_MS;
+      for (const name of onDisk) {
+        if (!name.endsWith('.bin')) continue;
+        const id = name.slice(0, -4);
+        const full = path.join(this.root, name);
+        // Skip anything written recently, so a file mid-upload is never removed.
+        const stat = await fs.stat(full).catch(() => null);
+        if (!stat || stat.mtimeMs > grace) continue;
+        if (await this.repo.findOne({ where: { id } })) continue;
+        await fs.rm(full, { force: true });
+        orphans += 1;
+      }
     }
 
     if (expired.length || orphans) {

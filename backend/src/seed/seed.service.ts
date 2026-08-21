@@ -1,4 +1,5 @@
 import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
+import { IS_SERVERLESS } from '../database/data-source-options';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
@@ -40,7 +41,24 @@ export class SeedService implements OnApplicationBootstrap {
     private dataSource: DataSource,
   ) {}
 
+  /**
+   * Seeding on boot is a development convenience, and only that.
+   *
+   * A serverless deployment "boots" on every cold start, so leaving this on
+   * would put a COUNT(*) in front of an unpredictable share of requests and let
+   * two instances starting at once race each other into a half-written dataset.
+   * There it is opt-in, and the way to load the demo data is `npm run seed`.
+   */
   async onApplicationBootstrap() {
+    const enabled = process.env.SEED_ON_BOOT
+      ? process.env.SEED_ON_BOOT === 'true'
+      : !IS_SERVERLESS;
+    if (!enabled) return;
+    await this.seedIfEmpty();
+  }
+
+  /** Idempotent: seeds only a database with no users in it. */
+  async seedIfEmpty() {
     const count = await this.userRepo.count();
     if (count > 0) {
       console.log('Database already seeded, skipping...');

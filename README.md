@@ -63,6 +63,17 @@ npm run dev                # http://localhost:5173
 The API owns the schema in development (`DB_SYNCHRONIZE=true`). For a pre-provisioned
 database, apply `database/schema.sql` and start the API with `DB_SYNCHRONIZE=false`.
 
+## Deploying
+
+**[DEPLOYMENT.md](DEPLOYMENT.md) is the step-by-step guide.** In outline: two Vercel
+projects from this one repository — the API from `backend/` as a serverless function,
+the frontend from `frontend/` as static files — plus a hosted Postgres.
+
+The same codebase runs both shapes; what differs is the environment it is handed. On
+serverless the app stores CVs in Postgres rather than on disk, leaves the schema and
+the seeder to `npm run db:setup` rather than doing either on boot, and refuses to start
+without a real `JWT_SECRET`. Each of those is explained where it appears in the guide.
+
 ## Demo Credentials
 
 **Recruiter console** — http://localhost:5173/dashboard
@@ -273,7 +284,7 @@ storage, so it is the most defended route here. Multer holds the upload **in mem
 
 | Control | What it stops |
 |---|---|
-| 5 MB cap, one file, bounded parts | Filling the disk, or the process, with one request |
+| 5 MB cap (4 MB on serverless), one file, bounded parts | Filling the disk, or the process, with one request |
 | Extension allowlist: `.pdf` `.doc` `.docx` | `.exe`, `.svg`, `.html` and everything else scriptable |
 | Declared content type must match the extension | A file renamed to look acceptable |
 | **Magic bytes must match too** | A PHP shell called `cv.pdf` — the header is `%PDF-`, or it is not a PDF |
@@ -288,15 +299,28 @@ is not a file somebody named badly.
 
 ### Storing it
 
-Files live under `UPLOAD_DIR` (a named Docker volume, never the bind-mounted source
-tree) as `<uuid>.bin`. Nothing is served statically from there; the only route out is
-the guarded download.
+Where the bytes go depends on the deployment, chosen by `RESUME_STORAGE`:
+
+| Driver | Bytes live in | Default for |
+|---|---|---|
+| `fs` | `UPLOAD_DIR` as `<uuid>.bin` — a named Docker volume, never the bind-mounted source tree | Docker and local |
+| `db` | A `bytea` column on `resume_files` | Serverless (Vercel) |
+
+`db` exists because a serverless function has no durable disk: the filesystem is
+read-only apart from a `/tmp` discarded with the instance, so a CV written there is
+accepted and then lost. Postgres is durable, already provisioned, and already the
+thing that decides who may read the row.
+
+Either way nothing is served statically; the only route out is the guarded download,
+and the column is `select: false` so a CV never rides along in a list response.
 
 An anonymous upload is **unclaimed** until the application that uses it arrives, and
-carries a 2-hour expiry. A sweep runs on boot and every 30 minutes to delete unclaimed
-uploads that expired, and any file whose row has gone — a deleted candidate cascades
+carries a 2-hour expiry. A sweep deletes unclaimed uploads that expired, and any file
+whose row has gone — a deleted candidate cascades
 the row away but not the bytes. Files written inside the grace window are skipped, so
-an upload in flight is never removed underneath its own request.
+an upload in flight is never removed underneath its own request. It runs on boot and
+every 30 minutes where there is a process to hold a timer, and rides along with uploads
+at the same interval where there is not.
 
 ### Giving it back
 
@@ -314,9 +338,9 @@ recruiter needs one to read a CV.
 ### Known limits
 
 - The rate limiter is an **in-process fixed window**. It protects one instance, which
-  suits a single container. Behind more than one replica, or anywhere the client IP is
-  worth spoofing, it belongs in Redis or at the edge; the guard is the enforcement
-  point to swap.
+  suits a single container. Behind more than one replica — every serverless deployment
+  is one — the effective limit is *instances x limit*, so it belongs in Redis or at the
+  edge; the guard is the enforcement point to swap.
 - No malware scanning. The type checks stop a file from *being* something else, not
   from *containing* something — a real PDF with a malicious payload is stored as a real
   PDF. Put a scanner in front of `ResumeStorageService.store()` before this faces real
@@ -518,12 +542,18 @@ Backend environment variables (see `backend/.env.example`):
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `PORT` | 3001 | API port |
-| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | localhost / 5432 / postgres / postgres / recruitment | Connection |
-| `DB_SYNCHRONIZE` | `true` | Set `false` when the schema is managed by `schema.sql` or migrations |
+| `DATABASE_URL` | unset | One connection string. Takes precedence over the five `DB_*` below — prefer it for any hosted provider |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | localhost / 5432 / postgres / postgres / recruitment | Connection, when there is no `DATABASE_URL` |
+| `DB_SYNCHRONIZE` | `true`, `false` in production | Set `false` when the schema is managed by `schema.sql`, migrations or `npm run db:schema` |
+| `DB_SSL` | on for serverless and for a `sslmode=` URL | TLS to the database |
+| `DB_POOL_MAX` | 10, 1 on serverless | Connections per instance |
 | `DB_LOGGING` | `false` | Log SQL |
-| `JWT_SECRET` | dev default | **Change before deploying** |
-| `CORS_ORIGIN` | any | Restrict in production |
-| `UPLOAD_DIR` | `./storage/resumes` | Where CVs are written. Must be writable, and must not be served statically — see [Handling uploaded CVs](#handling-uploaded-cvs). In Docker this is a named volume, so CVs survive a rebuild and never land in the repository. |
+| `JWT_SECRET` | dev fallback | **Required in production** — the app refuses to start without one, rather than signing tokens with a value published here |
+| `CORS_ORIGIN` | any | Comma-separated allowed origins. Restrict in production |
+| `RESUME_STORAGE` | `fs`, `db` on serverless | Where CV bytes go — see [Handling uploaded CVs](#handling-uploaded-cvs) |
+| `UPLOAD_DIR` | `./storage/resumes` | `fs` driver only. Must be writable, and must not be served statically. In Docker this is a named volume, so CVs survive a rebuild and never land in the repository |
+| `MAX_RESUME_MB` | 5, 4 on serverless | Upload ceiling |
+| `SEED_ON_BOOT` | `true`, `false` on serverless | Load demo data on boot when the database is empty |
 
 ## Technology Stack
 
@@ -533,7 +563,7 @@ Backend environment variables (see `backend/.env.example`):
 | Backend | NestJS 10, TypeORM 0.3, class-validator, Swagger |
 | Database | PostgreSQL 16 (JSONB, array columns, GIN indexes) |
 | Auth | JWT, bcryptjs, role-based guards |
-| DevOps | Docker, Docker Compose, container healthchecks |
+| DevOps | Docker, Docker Compose, container healthchecks; Vercel serverless (see [DEPLOYMENT.md](DEPLOYMENT.md)) |
 
 ## Not Yet Built
 

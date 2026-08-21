@@ -4,8 +4,9 @@ import {
 import { Candidate } from './candidate.entity';
 
 /**
- * Metadata for one uploaded CV. The bytes live on disk under `id` — never under
- * anything the uploader chose — and this row is the only way to find them.
+ * Metadata for one uploaded CV, and — where the deployment has no durable disk —
+ * the bytes themselves. On a filesystem the bytes live under `id`, never under
+ * anything the uploader chose; either way this row is the only way to find them.
  *
  * Uploads are append-only: replacing a CV writes a new row and a new file rather
  * than overwriting, so an application always resolves to the document that was
@@ -32,6 +33,21 @@ export class ResumeFile {
 
   @Column({ type: 'int' })
   sizeBytes: number;
+
+  /**
+   * The file itself, when the storage driver is `db`.
+   *
+   * Serverless platforms give a function a read-only filesystem and a /tmp that
+   * is discarded with the instance, so there is nowhere durable to put an
+   * upload. Postgres is durable, already provisioned, and already the thing that
+   * decides who may read the row — which keeps the access check and the bytes in
+   * one place. Null under the `fs` driver, where the bytes are on disk.
+   *
+   * `select: false`: a CV is megabytes, and listing applications must not drag
+   * every attached document across the wire. `read()` asks for it explicitly.
+   */
+  @Column({ type: 'bytea', nullable: true, select: false })
+  data: Buffer | null;
 
   /** SHA-256 of the stored bytes — integrity check on the way back out. */
   @Column({ type: 'varchar', length: 64 })

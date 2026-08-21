@@ -215,6 +215,10 @@ CREATE TABLE resume_files (
     -- Resolved from the file's own signature, not from the client's header.
     mime_type VARCHAR(100) NOT NULL,
     size_bytes INTEGER NOT NULL,
+    -- The file itself, under the `db` storage driver. Null under `fs`, where the
+    -- bytes are on disk as <id>.bin. A serverless deployment has no durable disk,
+    -- so there the column is where a CV actually lives.
+    data BYTEA,
     checksum VARCHAR(64) NOT NULL,
     claimed BOOLEAN DEFAULT false,
     -- Unclaimed uploads are swept, so a stranger cannot fill the disk and leave.
